@@ -6,6 +6,28 @@
 
 ---
 
+## The Real Model, Not the Spec Sheet
+
+The sprint spec assumed one configuration. The **actual** checkpoint (config.json + safetensors) differs:
+
+| Property | Assumed | **Measured** |
+|----------|---------|--------------|
+| Hidden size `d_model` | 576 | **576** |
+| Vocabulary | 50,000 | **49,152** |
+| Layers | 12 | **30** |
+| Query heads | 12 | **9** |
+| Key/Value heads | 4 | **3** |
+| Head dim `d_k` | 48 | **64** (= 576/9) |
+| `√d_k` | — | **8** |
+| `W_Q` | 576×576 | **576×576** |
+| `W_K`, `W_V` | 576×192 | **192×576** |
+| `W_O` | 192×576 | **576×576** |
+| `rope_theta` | — | **100,000** |
+
+Two headline claims survive measurement: `√d_k = 8`, and GQA still reduces the KV cache by exactly `9/3 = 3×`.
+
+---
+
 ## Unit 1 — Vectors & Dot Products (Research POV)
 
 ### Why the distinction matters
@@ -53,75 +75,6 @@ This is the honest, publishable take. Most tutorials cherry-pick clean examples 
 
 ---
 
-## The Real Model, Not the Spec Sheet
-
-The sprint spec assumed one configuration. The **actual** checkpoint (config.json + safetensors) differs:
-
-| Property | Assumed | **Measured** |
-|----------|---------|--------------|
-| Hidden size `d_model` | 576 | **576** |
-| Vocabulary | 50,000 | **49,152** |
-| Layers | 12 | **30** |
-| Query heads | 12 | **9** |
-| Key/Value heads | 4 | **3** |
-| Head dim `d_k` | 48 | **64** (= 576/9) |
-| `√d_k` | — | **8** |
-| `W_Q` | 576×576 | **576×576** |
-| `W_K`, `W_V` | 576×192 | **192×576** |
-| `W_O` | 192×576 | **576×576** |
-| `rope_theta` | — | **100,000** |
-
-Two headline claims survive measurement: `√d_k = 8`, and GQA still reduces the KV cache by exactly `9/3 = 3×`.
-
----
-
-## Repository Structure
-
-```
-linear-transformations-attention/
-├── README.md                    ← this file
-├── unit1_dot_products.ipynb     ← vectors, dot products, anisotropy diagnosis
-├── unit2_attention.ipynb        ← QK^T / √d_k, softmax saturation, weighted read
-├── unit3_rope.ipynb             ← position as rotation, frequency code, shift-invariance
-├── unit4_gqa.ipynb              ← grouped query attention, KV cache (WIP)
-└── unit1/
-    └── unit1.md                 ← research POV / working notes for Unit 1
-```
-
-Each notebook is **self-contained** (loads the model fresh), runs on CPU-only Windows in minutes, and follows the *issue → hypothesis → fix* narrative with inline statistics and graphs.
-
----
-
-## Notebooks
-
-| Unit | Topic | Core formula | Status |
-|------|-------|-------------|--------|
-| 1 | Vectors & dot products | `score_ij = q_i · k_j` | ✅ Complete |
-| 2 | Scaled attention | `A = softmax(QK^T / √d_k) · V` | ✅ Complete |
-| 3 | Rotary Position Embeddings | `q_m · k_n = q^T R((n−m)θ) k` | ✅ Complete |
-| 4 | Grouped Query Attention | `n_q / n_kv = 9 / 3 = 3×` | ⏳ Planned |
-
----
-
-## Running the Notebooks
-
-```bash
-# 1. Activate the environment (already provisioned in /venv)
-venv\Scripts\activate
-
-# 2. Launch
-jupyter notebook unit1_dot_products.ipynb
-```
-
-Requirements: `torch`, `transformers`, `numpy`, `matplotlib`, `jupyter`. Model is downloaded from HuggingFace Hub on first run (~270 MB, cached afterwards).
-
----
-
-## Roadmap → The Bigger Picture
-
-This is the first of a 7-repo math foundation feeding three production SLM systems: constrained decoding (blind agent), PII/injection sanitization with weight steering (RAG), and LoRA/quantization benchmarking (PEFT decoding). Each unit is a self-contained research-POV writeup measured on the real checkpoint, with the theory traced to exact layer/tensor shapes.
-
-
 ## Unit 2 — Scaled Attention & the √d_k Fix (Research POV)
 
 ### Why the distinction matters
@@ -158,6 +111,7 @@ out_h[i] = Σⱼ A_h[i,j] · V[j]     with   Σⱼ A_h[i,j] = 1
 
 The whole mechanism is two matrix products glued by a softmax: `QKᵀ` scores every token pair, `·V` reads the values those scores select. GQA makes the KV side one-third the width of the query side (192 vs 576) — the memory-saving design Unit 4 quantifies. The loose end: the model never scores raw q·k — it first *rotates* both by token position. That is Unit 3 (RoPE).
 
+---
 
 ## Unit 3 — RoPE: Position as a Rotation (Research POV)
 
@@ -204,4 +158,128 @@ q_m · k_n = qᵀ R((n−m)θ) k
 
 The model reads *relative distance* and *direction* structurally, for free. This is why RoPE suits edge inference — it is stateless, its cos/sin cache is trivial, and it composes with the KV-cache savings that Unit 4 quantifies next.
 
-> The honest version of CB 3.1 matters: permuting the sentence gives `S_σ = P S Pᵀ`, **not** `S` itself — pairwise scores between the same two tokens are unchanged, only the row/column labels move. Most tutorials hand-wave this; the notebook shows the un-permute check that makes it exact.
+> The honest version of the permutation check matters: permuting the sentence gives `S_σ = P S Pᵀ`, **not** `S` itself — pairwise scores between the same two tokens are unchanged, only the row/column labels move. Most tutorials hand-wave this; the notebook shows the un-permute check that makes it exact.
+
+---
+
+## Unit 4 — Grouped Query Attention & the KV-Cache Memory Math (Research POV)
+
+### Why the distinction matters
+
+Unit 2 revealed the footprint — 9 query heads, 3 KV heads, K/V width 192 (= 576/3). Unit 3 made attention position-aware. Unit 4 asks the question that decides whether an SLM fits on a phone: **how much memory does attention cost per token?** Generation is one token at a time, and every new token must attend to *all* previous tokens — so the model remembers each past token's K and V at every layer. That memory is the **KV cache**, and it is exactly what the formula counts:
+
+```
+cache bytes = layers × kv_heads × d_k × 2 × L × bytes/float
+```
+
+### Research-grade takeaway
+
+> With SmolLM2's real numbers (30 layers, 3 KV heads, `d_k = 64`) that is **11,520 floats per token**. Measured by looping all 30 real layers and projecting our sentence through each layer's actual `W_K`/`W_V`: GQA stores **69,120 floats** vs the **207,360** a hypothetical 9-head MHA would need — exactly **3.0×**. In fp16 at 2048 tokens that is **~47 MB vs ~142 MB** — the difference between a context that fits a phone and one that doesn't. `9/3 = 3` is not a slogan here; it is a measured ratio.
+
+### Per-token cost, in one line
+
+```
+floats/token = layers × kv_heads × d_k × 2
+
+GQA = 30 × 3 × 64 × 2 = 11,520
+MHA = 30 × 9 × 64 × 2 = 34,560   (counterfactual: only kv_heads changes 3 → 9)
+MQA = 30 × 1 × 64 × 2 =  3,840   (other extreme: kv_heads = 1)
+ratio = 34,560 / 11,520 = 3.0
+```
+
+Byte rows just multiply by 4 (fp32) or 2 (fp16/bf16): GQA costs 46 KB/token in fp32, 23 KB/token in fp16.
+
+### Measured findings (SmolLM2-135M, not assumed)
+
+| # | Claim (expectation) | Predicted | Measured | Verdict |
+|---|---------------------|-----------|----------|---------|
+| 1 | KV width = d_model / n_kv | 192 | `W_K`, `W_V` → (192, 576) | ✅ Holds |
+| 2 | group size = n_q / n_kv | 3 | 9 / 3 from config | ✅ Holds |
+| 3 | GQA cache = 3× smaller than MHA | ratio 3.0 | 69,120 vs 207,360 floats | ✅ Holds |
+| 4 | cache grows linearly with context | `const × L` | growth graph | ✅ Holds |
+
+### The measured proof, not the spec sheet
+
+The loop is the measurement — it pulls each of the 30 layers' real `W_K`/`W_V`, projects our sentence, and counts the actual floats a cache would hold. `mha_floats` is the counterfactual: same math, but `kv_heads = 9`. Only one number changes.
+
+```
+GQA real floats (30 layers):  69,120
+MHA hypothetical floats:     207,360
+ratio GQA : MHA:                3.0
+fp16 @ 2048 ctx:   GQA 47 MB | MHA 142 MB
+```
+
+### The growth curve — a picture of the on-device decision
+
+Three straight lines from the origin: the cache is **linear in L**. Slopes — MHA steepest (142 MB @ 2048), GQA middle (47 MB), MQA flattest (16 MB). Draw a horizontal line at "what fits in memory" and the graph tells you the max context each design supports — the on-device decision, read off a picture.
+
+### Why sharing is safe — and what never enters the cache
+
+The grouping rule from Unit 2: `group_of[h] = h // 3` → H0–H2 serve KV0, H3–H5 serve KV1, H6–H8 serve KV2. Queries ask many different questions, so each needs its own projection; but the *content* being read — keys and values — doesn't need 9 copies. Three well-trained copies serve all nine. That asymmetry is exactly what the narrower `W_K`/`W_V` width (192 vs 576) encodes.
+
+Why no "third group"? The three groups are structurally identical — same shape, same cost. More importantly, query heads never enter the cache at all: a query is computed for the current token, used once, then thrown away. Only K/V are stored for past tokens so future ones can attend to them. The formula counts `kv_heads` (3), never `query_heads` (9) — group 2 is already inside that "3."
+
+Why no "output heads" (`W_O`)? Two reasons. First, `W_O` is static, not cached — a fixed weight matrix (576×576 = 331,776 floats) that exists once regardless of context, applied the same way every step. Second, there are no separate "output heads" in GQA: the 9 attention heads' outputs concatenate to 576 and `W_O` mixes them down — a learned mixing matrix, not a set of per-token vectors, so there is nothing to remember.
+
+| Stage | Stored across tokens? | Why |
+|-------|----------------------|-----|
+| Queries | ❌ ephemeral | computed for current token, discarded |
+| Keys | ✅ cached | every past token's K must survive |
+| Values | ✅ cached | every past token's V must survive |
+| Output / W_O | ❌ static | fixed weight, same every step |
+
+The formula `layers × kv_heads × d_k × 2 × L` exists precisely because only K and V tick up with L. Queries and the output projection are the two things you don't see in it — now you know why.
+
+### The research-grade conclusion
+
+GQA is the **memory lever**: it cuts `kv_heads` from 9 to 3, and with it the KV cache for *every token of every layer*. Combined with RoPE (Unit 3 — stateless, trivial cos/sin cache), an SLM gets position-awareness *and* memory efficiency essentially for free.
+
+**Next — repo 2: `matrix-mult-composition-ffn-activations`** — the second block of the decoder layer: the MLP (gate/up/down projections, SiLU) that expands the 576-dim residual stream to 1536 and squeezes it back. Attention + FFN together are the complete decoder layer.
+
+---
+
+## Repository Structure
+
+```
+linear-transformations-attention/
+├── README.md                    ← this file
+├── unit1_dot_products.ipynb     ← vectors, dot products, anisotropy diagnosis
+├── unit2_attention.ipynb        ← QK^T / √d_k, softmax saturation, weighted read
+├── unit3_rope.ipynb             ← position as rotation, frequency code, shift-invariance
+├── unit4_gqa.ipynb              ← grouped query attention, KV-cache memory math
+└── unit1/
+    └── unit1.md                 ← research POV / working notes for Unit 1
+```
+
+Each notebook is **self-contained** (loads the model fresh), runs on CPU-only Windows in minutes, and follows the *issue → hypothesis → fix* narrative with inline statistics and graphs.
+
+---
+
+## Notebooks
+
+| Unit | Topic | Core formula | Status |
+|------|-------|-------------|--------|
+| 1 | Vectors & dot products | `score_ij = q_i · k_j` | ✅ Complete |
+| 2 | Scaled attention | `A = softmax(QK^T / √d_k) · V` | ✅ Complete |
+| 3 | Rotary Position Embeddings | `q_m · k_n = q^T R((n−m)θ) k` | ✅ Complete |
+| 4 | Grouped Query Attention | `cache = layers × kv_heads × d_k × 2 × L × bytes` | ✅ Complete |
+
+---
+
+## Running the Notebooks
+
+```bash
+# 1. Activate the environment (already provisioned in /venv)
+venv\Scripts\activate
+
+# 2. Launch
+jupyter notebook unit1_dot_products.ipynb
+```
+
+Requirements: `torch`, `transformers`, `numpy`, `matplotlib`, `jupyter`. Model is downloaded from HuggingFace Hub on first run (~270 MB, cached afterwards).
+
+---
+
+## Roadmap → The Bigger Picture
+
+This is the first of a 7-repo math foundation feeding three production SLM systems: constrained decoding (blind agent), PII/injection sanitization with weight steering (RAG), and LoRA/quantization benchmarking (PEFT decoding). Each unit is a self-contained research-POV writeup measured on the real checkpoint, with the theory traced to exact layer/tensor shapes.
