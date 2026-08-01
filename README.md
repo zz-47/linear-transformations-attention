@@ -82,7 +82,7 @@ linear-transformations-attention/
 ├── README.md                    ← this file
 ├── unit1_dot_products.ipynb     ← vectors, dot products, anisotropy diagnosis
 ├── unit2_attention.ipynb        ← QK^T / √d_k, softmax saturation, weighted read
-├── unit3_rope.ipynb             ← rotary position embeddings (WIP)
+├── unit3_rope.ipynb             ← position as rotation, frequency code, shift-invariance
 ├── unit4_gqa.ipynb              ← grouped query attention, KV cache (WIP)
 └── unit1/
     └── unit1.md                 ← research POV / working notes for Unit 1
@@ -98,7 +98,7 @@ Each notebook is **self-contained** (loads the model fresh), runs on CPU-only Wi
 |------|-------|-------------|--------|
 | 1 | Vectors & dot products | `score_ij = q_i · k_j` | ✅ Complete |
 | 2 | Scaled attention | `A = softmax(QK^T / √d_k) · V` | ✅ Complete |
-| 3 | Rotary Position Embeddings | `q_i = R(θ, i) · W_Q x_i` | ⏳ Planned |
+| 3 | Rotary Position Embeddings | `q_m · k_n = q^T R((n−m)θ) k` | ✅ Complete |
 | 4 | Grouped Query Attention | `n_q / n_kv = 9 / 3 = 3×` | ⏳ Planned |
 
 ---
@@ -119,7 +119,7 @@ Requirements: `torch`, `transformers`, `numpy`, `matplotlib`, `jupyter`. Model i
 
 ## Roadmap → The Bigger Picture
 
-This is the first of a 7-repo math foundation feeding three production SLM systems: constrained decoding (blind agent), PII/injection sanitization with weight steering (RAG), and LoRA/quantization benchmarking (PEFT decoding). Unit 3 (RoPE) will also carry a research + industrial-scope discussion on position encoding efficiency for long-context edge inference.
+This is the first of a 7-repo math foundation feeding three production SLM systems: constrained decoding (blind agent), PII/injection sanitization with weight steering (RAG), and LoRA/quantization benchmarking (PEFT decoding). Each unit is a self-contained research-POV writeup measured on the real checkpoint, with the theory traced to exact layer/tensor shapes.
 
 
 ## Unit 2 — Scaled Attention & the √d_k Fix (Research POV)
@@ -157,3 +157,51 @@ out_h[i] = Σⱼ A_h[i,j] · V[j]     with   Σⱼ A_h[i,j] = 1
 ```
 
 The whole mechanism is two matrix products glued by a softmax: `QKᵀ` scores every token pair, `·V` reads the values those scores select. GQA makes the KV side one-third the width of the query side (192 vs 576) — the memory-saving design Unit 4 quantifies. The loose end: the model never scores raw q·k — it first *rotates* both by token position. That is Unit 3 (RoPE).
+
+
+## Unit 3 — RoPE: Position as a Rotation (Research POV)
+
+### Why the distinction matters
+
+Unit 2 closed with a loose end: `QKᵀ` is **permutation-blind**. Nothing in the score formula mentions *where* a token sits — "the cat sat on the mat" and "mat the on cat sat the" produce identical pairwise scores (measured: permuting the rows of `X` yields `S_σ = P S Pᵀ`, recoverable exactly by un-permuting). Attention compares *identities*, never *addresses*. RoPE cures this by *rotating* each query and key by an angle proportional to its position — using plain high-school trigonometry.
+
+### Research-grade takeaway
+
+> RoPE converts **absolute position into relative angle**. Each dimension pair `(d, d+32)` is treated as a complex number `z = x0 + i·x1`, and rotating by θ is multiplying by the unit complex number `e^{iθ} = cosθ + i·sinθ` (Su et al., 2021). Because `R(α)ᵀR(β) = R(β−α)`, absolute positions cancel: `q_m·k_n = qᵀR((n−m)θ)k` depends **only on the gap** `n−m`. Measured on SmolLM2-135M's real layer-0 weights: the same tokens scored at positions 0–5 vs 7–12 give an *identical* score matrix, and the map becomes **asymmetric** — attention now distinguishes "i before j" from "j before i."
+
+### The frequency code — position read like a radio tuner
+
+```
+θ_d = rope_theta^(−2d/d_k) = 100000^(−2d/64)     d = 0, 1, …, 31
+```
+
+- `d = 0` → θ₀ = 1.0 → a full turn every ~6 positions → **fast**, a fine near-neighbor ruler
+- `d = 31` → θ₃₁ ≈ 1.4e-5 → a full turn every ~450k positions → **slow**, a coarse long-range ruler
+
+A 7-orders-of-magnitude spread, log-linear on a log plot — fast dims tick, slow dims crawl.
+
+### Measured findings (SmolLM2-135M, not assumed)
+
+| # | Claim (expectation) | Predicted | Measured | Verdict |
+|---|---------------------|-----------|----------|---------|
+| 1 | Attention is permutation-blind | `S_σ = P S Pᵀ` | `recover original: True` | ✅ Confirmed |
+| 2 | Rotation preserves length | `‖R v‖ = ‖v‖` | `norm preserved: True` (~1e-6) | ✅ Holds |
+| 3 | Only the gap `n−m` matters | `q_{m+p}·k_{n+p} = q_m·k_n` | `shift-invariant: True` | ✅ Holds |
+| 4 | Direction is now encoded | `S[i,j] ≠ S[j,i]` | `asymmetric: True` | ✅ Holds |
+| 5 | Frequency code decays with `d` | 1.0 → ~1e-5 | θ₀ = 1.0, θ₃₁ = 1.43e-5 | ✅ Holds |
+
+### The API-drift finding (measured, not assumed)
+
+transformers 5.x moved `rope_theta` out of the config root into `cfg.rope_scaling` (`{'rope_theta': 100000, 'rope_type': 'default'}`), and SmolLM2 ships `rope_interleaved: False` — dims pair **half-split** as `(d, d+32)`, not interleaved. The spec/API said one thing; the installed environment said another.
+
+### The research-grade conclusion
+
+RoPE is **position as rotation**: no learned position table, no extra parameters — just cos/sin cached once.
+
+```
+q_m · k_n = qᵀ R((n−m)θ) k
+```
+
+The model reads *relative distance* and *direction* structurally, for free. This is why RoPE suits edge inference — it is stateless, its cos/sin cache is trivial, and it composes with the KV-cache savings that Unit 4 quantifies next.
+
+> The honest version of CB 3.1 matters: permuting the sentence gives `S_σ = P S Pᵀ`, **not** `S` itself — pairwise scores between the same two tokens are unchanged, only the row/column labels move. Most tutorials hand-wave this; the notebook shows the un-permute check that makes it exact.
