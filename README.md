@@ -81,7 +81,7 @@ Two headline claims survive measurement: `√d_k = 8`, and GQA still reduces the
 linear-transformations-attention/
 ├── README.md                    ← this file
 ├── unit1_dot_products.ipynb     ← vectors, dot products, anisotropy diagnosis
-├── unit2_attention.ipynb        ← QK^T / √d_k, softmax saturation (WIP)
+├── unit2_attention.ipynb        ← QK^T / √d_k, softmax saturation, weighted read
 ├── unit3_rope.ipynb             ← rotary position embeddings (WIP)
 ├── unit4_gqa.ipynb              ← grouped query attention, KV cache (WIP)
 └── unit1/
@@ -97,7 +97,7 @@ Each notebook is **self-contained** (loads the model fresh), runs on CPU-only Wi
 | Unit | Topic | Core formula | Status |
 |------|-------|-------------|--------|
 | 1 | Vectors & dot products | `score_ij = q_i · k_j` | ✅ Complete |
-| 2 | Scaled attention | `A = softmax(QK^T / √d_k) · V` | 🔨 In progress |
+| 2 | Scaled attention | `A = softmax(QK^T / √d_k) · V` | ✅ Complete |
 | 3 | Rotary Position Embeddings | `q_i = R(θ, i) · W_Q x_i` | ⏳ Planned |
 | 4 | Grouped Query Attention | `n_q / n_kv = 9 / 3 = 3×` | ⏳ Planned |
 
@@ -120,3 +120,40 @@ Requirements: `torch`, `transformers`, `numpy`, `matplotlib`, `jupyter`. Model i
 ## Roadmap → The Bigger Picture
 
 This is the first of a 7-repo math foundation feeding three production SLM systems: constrained decoding (blind agent), PII/injection sanitization with weight steering (RAG), and LoRA/quantization benchmarking (PEFT decoding). Unit 3 (RoPE) will also carry a research + industrial-scope discussion on position encoding efficiency for long-context edge inference.
+
+
+## Unit 2 — Scaled Attention & the √d_k Fix (Research POV)
+
+### Why the distinction matters
+
+Unit 1 ended with a problem: the raw embedding space is **not** semantically linear — dot products in `W_E` cannot see similarity (anisotropy). Attention is the model's answer: it *learns* projections `W_Q`, `W_K` that rotate and scale embeddings into a space where `dot product ≈ relevance`. But that insight smuggles in a second, invisible problem: a dot product of two 64-dimensional vectors is not a bounded similarity score. It is a sum of 64 terms, so its magnitude grows like √64 = 8. Feed scores of size ~8–21 into softmax and the distribution collapses to near one-hot — attention stops reading context and just copies the single best token.
+
+### Research-grade takeaway
+
+> The `1/√d_k` in `softmax(QKᵀ/√d_k)` is neither learned nor tuned — it is the **statistical correction for dot-product growth in d_k dimensions**. Measured on SmolLM2-135M's real layer-0 weights: raw scores have std ≈ 7.07 (predicted √64 = 8). Dividing by 8 lifts mean attention entropy from 0.25 (near one-hot) to 1.52 (soft spread; max log 6 ≈ 1.79), restoring gradient flow. This is why *every* transformer carries that division.
+
+### Measured findings (SmolLM2-135M, not assumed)
+
+| # | Claim (expectation) | Predicted | Measured | Verdict |
+|---|---------------------|-----------|----------|---------|
+| 1 | d_k-dim dot products grow ~√d_k | std ≈ 8 | std = 7.07 | ✅ Holds |
+| 2 | Raw softmax saturates to one-hot | entropy → 0 | entropy 0.25, max prob 0.92 | ✅ Confirmed |
+| 3 | ÷√d_k restores a soft spread | entropy → log n | entropy 1.52, max prob 0.39 | ✅ Holds |
+| 4 | GQA: 9 query heads share 3 KV heads | KV width = 576/3 | 192 | ✅ Holds |
+| 5 | Attention output = weighted read of values | `out[i] = Σⱼ A[i,j]·V[j]` | hand-check matches | ✅ Holds |
+
+### The diagnosis chain
+
+1. **Scores grow like √d_k — arithmetic, not a bug.** `S[i,j] = q_i·k_j = Σ_{d=1}^{64} q_id·k_jd`. Summing 64 independent terms multiplies variance by 64, so std ≈ √64 = 8 (measured 7.07).
+2. **Softmax over unbounded scores saturates.** `exp(21)` dwarfs `exp(0)`, one column wins → entropy 0.25, attention copies a single token.
+3. **The fix (Vaswani et al., 2017, §3.2.1).** Rescale before softmax: `softmax(QKᵀ/√d_k)`. Scores drop to O(1), the distribution spreads (entropy 1.52), gradients flow.
+
+### The research-grade conclusion
+
+Attention is a **convex combination** — a weighted average of value vectors:
+
+```
+out_h[i] = Σⱼ A_h[i,j] · V[j]     with   Σⱼ A_h[i,j] = 1
+```
+
+The whole mechanism is two matrix products glued by a softmax: `QKᵀ` scores every token pair, `·V` reads the values those scores select. GQA makes the KV side one-third the width of the query side (192 vs 576) — the memory-saving design Unit 4 quantifies. The loose end: the model never scores raw q·k — it first *rotates* both by token position. That is Unit 3 (RoPE).
