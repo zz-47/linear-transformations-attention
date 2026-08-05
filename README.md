@@ -277,10 +277,6 @@ venv\Scripts\activate
 jupyter notebook unit1_dot_products.ipynb
 ```
 
-Requirements: `torch`, `transformers`, `numpy`, `matplotlib`, `jupyter`. Model is downloaded from HuggingFace Hub on first run (~270 MB, cached afterwards).
+Requirements: python -m install requirements.txt
 
 ---
-
-## Roadmap → The Bigger Picture
-
-This is the first of a 7-repo math foundation feeding three production SLM systems: constrained decoding (blind agent), PII/injection sanitization with weight steering (RAG), and LoRA/quantization benchmarking (PEFT decoding). Each unit is a self-contained research-POV writeup measured on the real checkpoint, with the theory traced to exact layer/tensor shapes.
