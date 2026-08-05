@@ -28,7 +28,7 @@ Two headline claims survive measurement: `√d_k = 8`, and GQA still reduces the
 
 ---
 
-## Unit 1 — Vectors & Dot Products (Research POV)
+## Vectors & Dot Products (Research POV)
 
 ### Why the distinction matters
 
@@ -69,17 +69,16 @@ score_ij = q_i · k_j = ‖q_i‖ ‖k_j‖ cos(θ)    ← angle AND magnitude
 
 ### The research-grade conclusion
 
-Semantic geometry is **not** present in the raw embedding table — it is *created* by the learned projections `W_Q`, `W_K`. Attention computes dot products in that transformed space, precisely because the model learns to rotate/scale embeddings into a space where `dot product ≈ semantic relevance`. This is the *raison d'être* of Unit 2.
+Semantic geometry is **not** present in the raw embedding table — it is *created* by the learned projections `W_Q`, `W_K`. Attention computes dot products in that transformed space, precisely because the model learns to rotate/scale embeddings into a space where `dot product ≈ semantic relevance`. This is the *raison d'être* of.
 
 This is the honest, publishable take. Most tutorials cherry-pick clean examples and teach a lie. This notebook teaches the truth the data exposes: *"we need learned linear maps because the raw space isn't semantically linear."*
 
 ---
 
-## Unit 2 — Scaled Attention & the √d_k Fix (Research POV)
+## — Scaled Attention & the √d_k Fix (Research POV)
 
 ### Why the distinction matters
-
-Unit 1 ended with a problem: the raw embedding space is **not** semantically linear — dot products in `W_E` cannot see similarity (anisotropy). Attention is the model's answer: it *learns* projections `W_Q`, `W_K` that rotate and scale embeddings into a space where `dot product ≈ relevance`. But that insight smuggles in a second, invisible problem: a dot product of two 64-dimensional vectors is not a bounded similarity score. It is a sum of 64 terms, so its magnitude grows like √64 = 8. Feed scores of size ~8–21 into softmax and the distribution collapses to near one-hot — attention stops reading context and just copies the single best token.
+ ended with a problem: the raw embedding space is **not** semantically linear — dot products in `W_E` cannot see similarity (anisotropy). Attention is the model's answer: it *learns* projections `W_Q`, `W_K` that rotate and scale embeddings into a space where `dot product ≈ relevance`. But that insight smuggles in a second, invisible problem: a dot product of two 64-dimensional vectors is not a bounded similarity score. It is a sum of 64 terms, so its magnitude grows like √64 = 8. Feed scores of size ~8–21 into softmax and the distribution collapses to near one-hot — attention stops reading context and just copies the single best token.
 
 ### Research-grade takeaway
 
@@ -109,15 +108,16 @@ Attention is a **convex combination** — a weighted average of value vectors:
 out_h[i] = Σⱼ A_h[i,j] · V[j]     with   Σⱼ A_h[i,j] = 1
 ```
 
-The whole mechanism is two matrix products glued by a softmax: `QKᵀ` scores every token pair, `·V` reads the values those scores select. GQA makes the KV side one-third the width of the query side (192 vs 576) — the memory-saving design Unit 4 quantifies. The loose end: the model never scores raw q·k — it first *rotates* both by token position. That is Unit 3 (RoPE).
+
+The whole mechanism is two matrix products glued by a softmax: `QKᵀ` scores every token pair, `·V` reads the values those scores select. GQA makes the KV side one-third the width of the query side (192 vs 576) — the memory-saving design quantifies. The loose end: the model never scores raw q·k — it first *rotates* both by token position. That is (RoPE).
 
 ---
 
-## Unit 3 — RoPE: Position as a Rotation (Research POV)
+
+## — RoPE: Position as a Rotation (Research POV)
 
 ### Why the distinction matters
-
-Unit 2 closed with a loose end: `QKᵀ` is **permutation-blind**. Nothing in the score formula mentions *where* a token sits — "the cat sat on the mat" and "mat the on cat sat the" produce identical pairwise scores (measured: permuting the rows of `X` yields `S_σ = P S Pᵀ`, recoverable exactly by un-permuting). Attention compares *identities*, never *addresses*. RoPE cures this by *rotating* each query and key by an angle proportional to its position — using plain high-school trigonometry.
+ closed with a loose end: `QKᵀ` is **permutation-blind**. Nothing in the score formula mentions *where* a token sits — "the cat sat on the mat" and "mat the on cat sat the" produce identical pairwise scores (measured: permuting the rows of `X` yields `S_σ = P S Pᵀ`, recoverable exactly by un-permuting). Attention compares *identities*, never *addresses*. RoPE cures this by *rotating* each query and key by an angle proportional to its position — using plain high-school trigonometry.
 
 ### Research-grade takeaway
 
@@ -156,17 +156,17 @@ RoPE is **position as rotation**: no learned position table, no extra parameters
 q_m · k_n = qᵀ R((n−m)θ) k
 ```
 
-The model reads *relative distance* and *direction* structurally, for free. This is why RoPE suits edge inference — it is stateless, its cos/sin cache is trivial, and it composes with the KV-cache savings that Unit 4 quantifies next.
+The model reads *relative distance* and *direction* structurally, for free. This is why RoPE suits edge inference — it is stateless, its cos/sin cache is trivial, and it composes with the KV-cache savings that quantifies next.
 
 > The honest version of the permutation check matters: permuting the sentence gives `S_σ = P S Pᵀ`, **not** `S` itself — pairwise scores between the same two tokens are unchanged, only the row/column labels move. Most tutorials hand-wave this; the notebook shows the un-permute check that makes it exact.
 
 ---
 
-## Unit 4 — Grouped Query Attention & the KV-Cache Memory Math (Research POV)
+## — Grouped Query Attention & the KV-Cache Memory Math (Research POV)
 
 ### Why the distinction matters
 
-Unit 2 revealed the footprint — 9 query heads, 3 KV heads, K/V width 192 (= 576/3). Unit 3 made attention position-aware. Unit 4 asks the question that decides whether an SLM fits on a phone: **how much memory does attention cost per token?** Generation is one token at a time, and every new token must attend to *all* previous tokens — so the model remembers each past token's K and V at every layer. That memory is the **KV cache**, and it is exactly what the formula counts:
+ revealed the footprint — 9 query heads, 3 KV heads, K/V width 192 (= 576/3). made attention position-aware. asks the question that decides whether an SLM fits on a phone: **how much memory does attention cost per token?** Generation is one token at a time, and every new token must attend to *all* previous tokens — so the model remembers each past token's K and V at every layer. That memory is the **KV cache**, and it is exactly what the formula counts:
 
 ```
 cache bytes = layers × kv_heads × d_k × 2 × L × bytes/float
@@ -215,7 +215,7 @@ Three straight lines from the origin: the cache is **linear in L**. Slopes — M
 
 ### Why sharing is safe — and what never enters the cache
 
-The grouping rule from Unit 2: `group_of[h] = h // 3` → H0–H2 serve KV0, H3–H5 serve KV1, H6–H8 serve KV2. Queries ask many different questions, so each needs its own projection; but the *content* being read — keys and values — doesn't need 9 copies. Three well-trained copies serve all nine. That asymmetry is exactly what the narrower `W_K`/`W_V` width (192 vs 576) encodes.
+The grouping rule from: `group_of[h] = h // 3` → H0–H2 serve KV0, H3–H5 serve KV1, H6–H8 serve KV2. Queries ask many different questions, so each needs its own projection; but the *content* being read — keys and values — doesn't need 9 copies. Three well-trained copies serve all nine. That asymmetry is exactly what the narrower `W_K`/`W_V` width (192 vs 576) encodes.
 
 Why no "third group"? The three groups are structurally identical — same shape, same cost. More importantly, query heads never enter the cache at all: a query is computed for the current token, used once, then thrown away. Only K/V are stored for past tokens so future ones can attend to them. The formula counts `kv_heads` (3), never `query_heads` (9) — group 2 is already inside that "3."
 
@@ -232,7 +232,8 @@ The formula `layers × kv_heads × d_k × 2 × L` exists precisely because only 
 
 ### The research-grade conclusion
 
-GQA is the **memory lever**: it cuts `kv_heads` from 9 to 3, and with it the KV cache for *every token of every layer*. Combined with RoPE (Unit 3 — stateless, trivial cos/sin cache), an SLM gets position-awareness *and* memory efficiency essentially for free.
+
+GQA is the **memory lever**: it cuts `kv_heads` from 9 to 3, and with it the KV cache for *every token of every layer*. Combined with RoPE  — stateless, trivial cos/sin cache), an SLM gets position-awareness *and* memory efficiency essentially for free.
 
 **Next — repo 2: `matrix-mult-composition-ffn-activations`** — the second block of the decoder layer: the MLP (gate/up/down projections, SiLU) that expands the 576-dim residual stream to 1536 and squeezes it back. Attention + FFN together are the complete decoder layer.
 
@@ -248,7 +249,7 @@ linear-transformations-attention/
 ├── unit3_rope.ipynb             ← position as rotation, frequency code, shift-invariance
 ├── unit4_gqa.ipynb              ← grouped query attention, KV-cache memory math
 └── unit1/
-    └── unit1.md                 ← research POV / working notes for Unit 1
+    └── unit1.md                 ← research POV / working notes for
 ```
 
 Each notebook is **self-contained** (loads the model fresh), runs on CPU-only Windows in minutes, and follows the *issue → hypothesis → fix* narrative with inline statistics and graphs.
